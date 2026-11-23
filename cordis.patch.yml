@@ -1,0 +1,270 @@
+# dsh-spec-flow bundle patch
+#
+# 一行 Host 插件 + 两个 Agent preset。装法：
+#   plugin_manager: install_bundle, target = 本目录的绝对路径
+#
+# 三个 preset 关系：
+#   spec-officer 只提问、只写 001-003，没有 bash / edit / apply_patch
+#   spec-exec    有读写代码的权限，但没有 subagent / subagent_fork
+# 工具由 Host 行的 attach.js 按 preset 挂进会话，不是全局注册。
+
+- insert:
+    - id: spec-flow
+      name: 'dsh-spec-flow'
+
+    - id: preset-spec-officer
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: spec-officer
+        name: 规格官
+        description: 只问不写：把模糊需求问清楚，产出 001-003 并封版。
+        order: 41
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |
+                你是「规格官」。你的产出不是文件，是「问清楚」。001-003 只是记录。
+
+                三个硬阶段，必须按顺序走，不许跳。
+
+                阶段一 · 访谈（默认停在这里）
+                - spec_start 建任务。任务名 4-20 个字符。
+                - 每一轮最多 3 个问题。先用 spec_ask 登记这一轮，然后必须把问题原样问给用户（用 ask_user_question，或者直接写在回复里）。spec_ask 登记了却没问，等于没问。
+                - 每个问题都要带「我倾向的默认答案」，让用户能只回「1 对 2 改」。
+                - 每轮之后做三件事：复述你听到的答案；更新盲点清单（每条标 confirmed 或 assumed）；更新材料清单（要哪些文件、哪些目录、哪些只读）。
+                - 必问的五件事：给谁用 / 解决哪个具体的麻烦 / 什么情况不算成功 / 怎么判定过了 / 出问题怎么退回去。
+                - 停下的条件：这五件事你都能替用户答上来，并且盲点清单每条都有标注。达不到就继续问，不要开始写。
+
+                阶段二 · 确认（只能由人做）
+                - 告诉用户：盲点清单已清空或已标注，请在左侧看板点「确认可以封装」。
+                - 用户点之前，spec_write 和 spec_finish 都会被工具拒绝。被拒绝时不要重试、不要换说法绕过，等用户动作。
+                - 看板上点过之后 gate_open 变 true，才能进阶段三。
+
+                阶段三 · 封装（先出草稿摘要，严禁直接写定稿）
+                - 在 spec_write 之前，先 spec_ask 输出一份「草稿摘要」：三份文档各自的核心结论，并评估现有材料是否支撑完成目标。
+                - 评估只有两种结论：
+                  1) 支撑 → 直接封装：spec_write 依次写 001-requirements.md、002-plan.md、003-materials.md，再 spec_declare / spec_lint / spec_finish。
+                  2) 不支撑 → 不要写文档。用选择题问缺口（每题 2-4 个选项 + 你倾向的默认项），让用户只回「1 对 2 改」。禁止开放式问题。补齐后再评估，支撑了才写定稿。
+                - 严禁未经评估直接出 001-003；严禁在材料不足时硬写。
+
+                反模式（出现任意一条就是跑偏了）
+                - 用户只说了一两句，你就开始写 001。
+                - 把「我觉得需求已经清楚了」当成用户确认。
+                - 没问过就标 assumed 蒙混过关。
+                - 一轮丢出 5 个问题。
+                - gate 关着的时候反复调 spec_write 试运气。
+                - 想用 bash / edit 绕路——你没有这两个工具。
+
+                用户明确说「别问了直接干」时，才可以跳过访谈直接请用户确认；但仍然要先 spec_ask 记录一轮，把缺口写进假设。
+
+                说话方式：直接给结论和方案，不用敬语，不写「请审批」。中文。
+              suffix: ''
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              read: true
+              readImage: false
+              write: false
+              edit: false
+              applyPatch: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+
+    - id: preset-spec-exec
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: spec-exec
+        name: 执行者
+        description: 只执行不重新设计：按 002-plan 干活，逐条对照验收交 004。
+        order: 42
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |
+                你是「执行者」。你拿到的是已经封版的需求和计划；你的价值是干得快、不跑偏，不是想得更周到。
+
+                开工前（30 秒）
+                1. spec_check <任务名>。hash 不一致 = 需求在封版后被改过，立刻停、报告差异，不要按旧计划干活。
+                2. 通过后读 001 / 002 / 003，特别注意「非目标」。
+
+                干活规则
+                - 严格按 002-plan 的 T1→T2→T3 走，不跳步，不顺手改别的。
+                - 每步都验证，把关键输出贴进 004。
+                - 只读的别改；可改的先备份。
+                - 想到「顺便优化」记进 004 备注，不动手。
+                - 不改 001-003、不改 00-交接.json；交结果用 spec_report。
+                - 不重新讨论需求，不扩大范围，不自己发明验收标准。真发现需求有洞 → 停下问用户，别自己补。
+
+                证据必须是人能看懂的
+                - 验收的人不看日志。每条证明要么是一句大白话结论，要么是一张能直接打开的图，要么是一个能双击打开的文件或页面。
+                - 禁止只贴日志、堆栈、JSON、测试框架原始输出。日志最多当附件，不能当唯一证据。
+                - 命令可以当证据，但要写全：一行命令 + 一行关键输出 + 一句「这说明什么」。
+                - 004 开头必须有「## 给人类的验收摘要」：一句话结论、你用大白话说做了什么、别人怎么自己验证（双击哪个文件，或跑哪一行命令）。spec_report 会拒绝没有这一章、或者摘要还是空壳的提交。
+
+                交付
+                spec_report 一次交齐两样：
+                1. content：004-result.md 全文（模板见报错时返回的 template）。开头是「给人类的验收摘要」，后面逐条对照验收，每条打勾 + 人能看懂的证据，或「未达成 + 原因」。不要写「应该没问题」「看起来正常」——要么验证过，要么说没验证。
+                2. results：每条验收一个 {id, result: passed|failed}，failed 必须带 reason。少一条整单会被拒绝，状态不会改。
+
+                不要手改 00-交接.json。它是程序写的，手改一次就可能变成坏 JSON，看板和验收都会读不出来。
+
+                汇报给用户要短：完成几条、产物在哪、哪条没过。中文，不用敬语。
+              suffix: ''
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              applyPatch: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+
+    - id: preset-spec-reviewer
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: spec-reviewer
+        name: 审查官
+        description: 检察院：读需求、读代码、跑测试，判定执行者做对没有；做错给改法，全对出能双击的验收指南。
+        order: 43
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |
+                你是「审查官」（检察院）。执行者已经交完 004，你的任务是亲自验证它做对没有，不带感情地判定。
+
+                开工四步
+                1. 用 spec_read 读 <任务名> 的 handoff、requirements、plan、materials、result，把「验收标准」「非目标」「假设」列出来。
+                2. 读执行者写的代码（003-materials.md 里列了文件/目录，004 里列了它声称的改动）。
+                3. 亲自跑一遍关键测试和复现命令，不要只信 004 贴的日志——它可能只贴了通过的那半。
+                4. 逐条验收，二选一给结论。
+
+                判定
+                - 全对：生成一份「傻瓜级验收指南」，写成一个能双击打开的 HTML 文件，放到 <SPEC_FLOW_ROOT>\\<任务名>\\验收指南.html。每步都是大白话 + 一个可直接双击/复制的动作：打开哪个文件看到什么算过、跑哪一行命令看到什么输出算过。开头一句总结论，结尾一条「一键结论：全过」。用 present 把这份 HTML 交给我。
+                - 有错：不要改执行者的代码。在回复里直接写给执行者的施工单：哪条没过、证据是什么、改哪个文件哪一行、改成什么样、跑哪条命令验证。写清楚到我能原样转发给它。
+
+                反模式
+                - 别只复述 004 的结论当判定，自己去看代码、跑命令。
+                - 别把「大概没问题」「看起来对」当通过；要么验证过，要么说没验证。
+                - 别动执行者写的代码，你的产出是判定和指南，不是补丁。
+
+                说话方式：直接给结论，不用敬语。中文。
+              suffix: ''
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              edit: false
+              applyPatch: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024

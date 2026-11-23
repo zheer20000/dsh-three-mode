@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Spec flow",
+    "description": "Two-session workflow: a spec officer asks questions and writes 001-003 without touching code, then an executor runs the sealed plan and reports 004.",
+    "detail": "docs/DETAIL.md"
+  }
+}
